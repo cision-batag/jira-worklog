@@ -1,0 +1,109 @@
+#!/usr/bin/env groovy
+
+@Grab(group='com.mashape.unirest', module='unirest-java', version='1.4.9')
+import com.mashape.unirest.http.Unirest
+
+import groovy.json.JsonBuilder
+import groovy.json.JsonSlurper
+import java.time.Duration
+import java.time.OffsetDateTime
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
+
+def parseDuration(time) {
+    def timeMatcher = time =~ /(\d+)(h|m|s)/
+    if (!timeMatcher.find()) {
+        throw new Exception("Invalid time format")
+    }
+    def timeAmount = timeMatcher[0][1].toInteger()
+    def timeUnit = timeMatcher[0][2]
+
+    def duration
+    if (timeUnit == 'm') {
+        duration = Duration.ofMinutes(timeAmount)
+    } else if (timeUnit == 'h') {
+        duration = Duration.ofHours(timeAmount)
+    } else {
+        duration = Duration.ofSeconds(timeAmount)
+    }
+    return duration
+}
+
+def getStartDate(durationOffset = Duration.ofSeconds(0)) {
+    def formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSZ")
+    formatter.format(OffsetDateTime.now(ZoneOffset.UTC).minusSeconds(durationOffset.toSeconds()))
+}
+
+def listIssues(host, authKey) {
+    def response = Unirest.get("${host}/rest/api/3/search")
+        .queryString("jql", "assignee=currentuser() AND status!=done")
+        .header("Authorization", "Basic ${authKey}")
+        .header("Accept", "application/json")
+        .asString()
+
+    def issuesResponse = new JsonSlurper().parseText(response.getBody())
+    println "Active issues (${issuesResponse.issues.size()})"
+    issuesResponse.issues.each { println "* ${it.key}: ${it.fields.summary} [${it.fields.status.name}]" }
+}
+
+def logWork(host, authKey, issue, duration, comment) {
+    def worklogEntry = [
+      "timeSpentSeconds": duration.toSeconds(),
+      "comment": [
+        "type": "doc",
+        "version": 1,
+        "content": [
+          [
+            "type": "paragraph",
+            "content": [
+              [
+                "text": "${comment}",
+                "type": "text"
+              ]
+            ]
+          ]
+        ]
+      ],
+      "started": "${getStartDate(duration)}"
+    ]
+
+    println "${worklogEntry.started}: [${duration}] ${comment}"
+
+    def response = Unirest.post("${host}/rest/api/3/issue/${issue}/worklog")
+        .header("Authorization", "Basic ${authKey}")
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
+        .body(new JsonBuilder(worklogEntry).toString())
+        .asString()
+
+    println "${response.getStatus()}: ${response.getStatusText()}"
+}
+
+def main() {
+    def user = System.getenv('JIRA_API_USER')
+    def token = System.getenv('JIRA_API_TOKEN')
+    def host = System.getenv('JIRA_API_HOST')
+
+    if (user == null || token == null || host == null) {
+        println "Please provide JIRA_API_USER, JIRA_API_TOKEN, JIRA_API_HOST env. variables"
+        println "To create an API token please visit: https://id.atlassian.com/manage-profile/security/api-tokens"
+        System.exit 1
+    }
+
+    def authKey = "${user}:${token}".bytes.encodeBase64().toString()
+
+    if (args.length != 3) {
+        println "Usage: worklog <issue> <time> <comment>"
+        println "Use time format: 60s, 10m, 1h"
+        listIssues(host, authKey)
+        System.exit 0
+    }
+
+    def issue = args[0]
+    def duration = parseDuration(args[1])
+    def comment = args[2].replaceAll('"', '\\"')
+
+    logWork(host, authKey, issue, duration, comment)
+}
+
+main()
